@@ -1,0 +1,12 @@
+# Ignora log di gioco e file generati automaticamente
+*.csv
+*.xlsx
+*.bak
+*.log
+
+# Ignora cartelle di log
+logs/
+
+# Ignora cache Python
+__pycache__/
+*.pyc
