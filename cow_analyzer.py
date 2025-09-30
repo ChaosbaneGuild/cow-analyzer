@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-cow_analyzer.py (versione aggiornata)
-Parse Clash of Worlds logs (Attack / Defense), compute per-war and season leaderboards,
-distribute fortification bonuses among winners, export Excel + season JSON,
-e calcola anche il punteggio totale della gilda per ogni guerra.
-"""
-
 import sys
 import argparse
 from pathlib import Path
@@ -13,145 +5,49 @@ import re
 import json
 import pandas as pd
 
-# -------- CONFIG: adjust guild members & fort lists here if needed ----------
-GUILD_MEMBERS = {
-    "LOKI","LoveBigFeet","Frodo","H4V0C","Wadjet..","HAI","Nemo","CKG","yoyo",
-    "Barah","FakeTaxi","georgesantos","Mokree","Masterlynch","DLGS","XungCa",
-    "BuzzKill","Obi-Wan Kenobi","DrStein","Samujas","Pelarian Jauh","ElenDil",
-    "kaliber 44","Biff","Pepp","Avalon"
-}
-GUILD_NORM = {g.strip().lower() for g in GUILD_MEMBERS}
-
-HERO_FORTS = {"Barracks","Mage Academy","Lighthouse","Foundry","Engineerium","Shooting Range",
-    "Bastion","Heroes' Bridge","Alchemy Tower","City Hall","Citadel"}
-TITAN_FORTS = {"Bridge","Spring of Elements","Bastion of Fire","Gates of Nature","Bastion of Ice",
-    "Altar of Life","Ether Prism","Sun Temple","Moon Temple"}
-HERO_SET = set(f.lower() for f in HERO_FORTS)
-TITAN_SET = set(f.lower() for f in TITAN_FORTS)
-
-_IGNORE_RE = re.compile(
-    r"(skill|cooldown|decrease|increase|bonus|fortification|captured|victory|defeat|points|\+|attack|defense|buff|resist|reduction|chance|critical|stun|heal|regen|immunity)",
-    flags=re.IGNORECASE
-)
-
-SEASON_FILE = Path("season_scores.json")
-
-# ----------------- utility functions -----------------
-def _clean_base_fort(name):
-    return re.sub(r"\s*\(.*?\)","", str(name)).strip().lower()
-
+# ----------------- helper functions -----------------
 def parse_attack_text(text):
     rows = []
-    bonuses = {}
     for line in text.splitlines():
         cols = [c.strip() for c in line.split(",")]
-        if len(cols) >= 4 and cols[1] in ("Victory","Defeat") and cols[2].startswith("+"):
-            fort_display = cols[0]
-            base_fort = _clean_base_fort(fort_display)
-            result = cols[1]
+        if len(cols) >= 4 and cols[1] in ("Victory", "Defeat"):
             try:
-                pts = float(cols[2].replace("+",""))
+                pts = float(cols[2].replace("+", ""))
             except:
-                pts = 0.0
-            attacker = re.sub(r"\s*\(.*?\)","", cols[3]).strip()
-            rows.append({
-                "Fortification": fort_display,
-                "BaseFort": base_fort,
-                "Attacker": attacker,
-                "Result": result,
-                "Points": pts
-            })
-        elif len(cols) >= 3 and cols[1] == "Fortification captured" and cols[2].startswith("+"):
-            base = _clean_base_fort(cols[0])
+                pts = 0
+            rows.append({"Player": cols[0], "Result": cols[1], "Points": pts, "Type": cols[3]})
+        elif len(cols) >= 3 and cols[1] == "Fortification captured":
             try:
-                bonus = float(cols[2].replace("+",""))
+                pts = float(cols[2].replace("+", ""))
             except:
-                bonus = 0.0
-            bonuses[base] = bonuses.get(base, 0.0) + bonus
-
-    if not rows:
-        return pd.DataFrame(columns=["Fortification","BaseFort","Attacker","Result","Points","Type"])
-
-    df = pd.DataFrame(rows)
-    df["Type"] = df["BaseFort"].apply(lambda x: "Heroes" if x in HERO_SET else ("Titans" if x in TITAN_SET else "Unknown"))
-
-    bonus_rows = []
-    for base, total_bonus in bonuses.items():
-        winners = df[(df["BaseFort"]==base) & (df["Result"]=="Victory")]
-        if len(winners) > 0 and total_bonus > 0:
-            share = total_bonus / len(winners)
-            for _, wr in winners.iterrows():
-                bonus_rows.append({
-                    "Fortification": wr["Fortification"],
-                    "BaseFort": base,
-                    "Attacker": wr["Attacker"],
-                    "Result": "Bonus",
-                    "Points": share,
-                    "Type": wr["Type"]
-                })
-    if bonus_rows:
-        df = pd.concat([df, pd.DataFrame(bonus_rows)], ignore_index=True)
-    return df
+                pts = 0
+            rows.append({"Player": cols[0], "Result": "Fortification captured", "Points": pts, "Type": "Bonus"})
+    return pd.DataFrame(rows)
 
 def parse_defense_text_strict(text):
     rows = []
     for line in text.splitlines():
         cols = [c.strip() for c in line.split(",")]
-        if len(cols) < 2:
-            continue
-        fort = cols[0]
-        result = cols[1].lower()
-        base = _clean_base_fort(fort)
-        defender = None
-        for cand in reversed(cols):
-            cclean = re.sub(r"\s*\(.*?\)","", cand).strip()
-            if not cclean:
-                continue
-            cnorm = cclean.lower()
-            if cnorm in GUILD_NORM:
-                defender = cclean
-                break
-            cand_alnum = re.sub(r'[^a-z0-9]','', cnorm)
-            if cand_alnum and any(re.sub(r'[^a-z0-9]','',g)==cand_alnum for g in GUILD_NORM):
-                defender = cclean
-                break
-            if _IGNORE_RE.search(cclean):
-                continue
-        if defender and result == "defeat":
-            if base in HERO_SET:
-                btype = "Heroes"
-            elif base in TITAN_SET:
-                btype = "Titans"
-            else:
-                btype = "Unknown"
-            rows.append({
-                "Fortification": fort,
-                "BaseFort": base,
-                "Defender": defender,
-                "Type": btype
-            })
-    if not rows:
-        return pd.DataFrame(columns=["Fortification","BaseFort","Defender","Type"])
+        if len(cols) >= 3 and cols[1] == "Defense Victory":
+            rows.append({"Player": cols[0], "Result": "Defense Victory", "Points": 1, "Type": cols[2]})
     return pd.DataFrame(rows)
 
-# ----------------- season helpers -----------------
 def load_season():
-    if SEASON_FILE.exists():
-        try:
-            return json.loads(SEASON_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {"heroes_attack":{}, "titans_attack":{}, "heroes_defense":{}, "titans_defense":{}}
-    return {"heroes_attack":{}, "titans_attack":{}, "heroes_defense":{}, "titans_defense":{}}
+    season_file = Path("season_scores.json")
+    if season_file.exists():
+        return json.loads(season_file.read_text(encoding="utf-8"))
+    return {}
 
 def save_season(season):
-    SEASON_FILE.write_text(json.dumps(season, indent=2), encoding="utf-8")
+    season_file = Path("season_scores.json")
+    season_file.write_text(json.dumps(season, indent=2), encoding="utf-8")
 
-# ----------------- nuova funzione per punteggio totale gilda -----------------
+# ----------------- calcolo punteggio totale gilda -----------------
 def compute_guild_score(text):
     total = 0.0
     for line in text.splitlines():
         cols = [c.strip() for c in line.split(",")]
-        if len(cols) >= 4 and cols[1] in ("Victory","Defeat") and cols[2].startswith("+"):
+        if len(cols) >= 4 and cols[1] in ("Victory", "Defeat") and cols[2].startswith("+"):
             try:
                 total += float(cols[2].replace("+", ""))
             except:
@@ -163,7 +59,56 @@ def compute_guild_score(text):
                 continue
     return total
 
-# ----------------- main processing -----------------
+# ----------------- nuova funzione export HTML -----------------
+def export_html(ha_season, hd_season, ta_season, td_season, guild_scores):
+    html_template = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>CoW Guild Rankings</title>
+        <!-- Bootstrap -->
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+        <!-- DataTables -->
+        <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
+    </head>
+    <body class="bg-light">
+        <div class="container py-4">
+            <h1 class="text-center mb-4">🏆 CoW Guild Rankings</h1>
+
+            <h2>Guild Scores per War</h2>
+            {guild_scores.to_html(index=False, classes="table table-striped table-bordered", border=0)}
+
+            <h2>Heroes Attack (Season)</h2>
+            {ha_season.to_html(index=False, classes="table table-striped table-bordered", border=0)}
+
+            <h2>Heroes Defense (Season)</h2>
+            {hd_season.to_html(index=False, classes="table table-striped table-bordered", border=0)}
+
+            <h2>Titans Attack (Season)</h2>
+            {ta_season.to_html(index=False, classes="table table-striped table-bordered", border=0)}
+
+            <h2>Titans Defense (Season)</h2>
+            {td_season.to_html(index=False, classes="table table-striped table-bordered", border=0)}
+        </div>
+
+        <!-- JS -->
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+        <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+        <script>
+            $(document).ready(function(){{
+                $('table').DataTable();
+            }});
+        </script>
+    </body>
+    </html>
+    """
+
+    with open("index.html", "w", encoding="utf-8") as f:
+        f.write(html_template)
+    print("✅ Generato index.html con tabelle migliorate per GitHub Pages")
+
+# ----------------- main -----------------
 def main(argv):
     parser = argparse.ArgumentParser(description="Process CoW logs and generate ranking files")
     parser.add_argument("files", nargs="*", help="CSV log files (globs allowed). If none, all *.csv in cwd are processed.")
@@ -185,16 +130,15 @@ def main(argv):
     for p in files:
         m = re.match(r"(\d{2}-\d{2}-\d{4})", p.name)
         key = m.group(1) if m else p.name
-        groups.setdefault(key, {"attack": None, "defense": None, "attack_path": None, "defense_path": None})
+        groups.setdefault(key, {"attack": None, "defense": None})
         if "attack log" in p.name.lower():
             groups[key]["attack"] = p
-            groups[key]["attack_path"] = p.name
         if "defense log" in p.name.lower():
             groups[key]["defense"] = p
-            groups[key]["defense_path"] = p.name
 
     season = load_season()
     per_war = {}
+
     for key, info in sorted(groups.items(), key=lambda x: x[0]):
         attack_df = pd.DataFrame()
         defense_df = pd.DataFrame()
@@ -206,81 +150,33 @@ def main(argv):
                 attack_df = parse_attack_text(txt)
                 guild_score = compute_guild_score(txt)
             except Exception as e:
-                print(f"Error reading/parsing attack file {info['attack']}: {e}")
+                print(f"Error parsing attack file {info['attack']}: {e}")
 
         if info["defense"]:
             try:
                 txt = info["defense"].read_text(encoding="utf-8", errors="ignore")
                 defense_df = parse_defense_text_strict(txt)
             except Exception as e:
-                print(f"Error reading/parsing defense file {info['defense']}: {e}")
+                print(f"Error parsing defense file {info['defense']}: {e}")
 
-        per_war[key] = {
-            "attack": attack_df,
-            "defense": defense_df,
-            "attack_path": info.get("attack_path"),
-            "defense_path": info.get("defense_path"),
-            "guild_score": guild_score,
-        }
-
+        per_war[key] = {"attack": attack_df, "defense": defense_df, "guild_score": guild_score}
         if guild_score is not None:
             print(f"Totale gilda {key}: {guild_score}")
 
-        # accumulo season
-        if not attack_df.empty:
-            for t in ("Heroes","Titans"):
-                sub = attack_df[attack_df["Type"]==t].groupby("Attacker")["Points"].sum()
-                key_s = f"{t.lower()}_attack"
-                for player, pts in sub.items():
-                    season[key_s][player] = season[key_s].get(player, 0.0) + float(pts)
-        if not defense_df.empty:
-            for t in ("Heroes","Titans"):
-                sub = defense_df[defense_df["Type"]==t]["Defender"].value_counts()
-                key_s = f"{t.lower()}_defense"
-                for player, cnt in sub.items():
-                    season[key_s][player] = season[key_s].get(player, 0) + int(cnt)
+    ha_season = pd.concat([df[df["Type"]=="Heroes"] for d in per_war.values() if not d["attack"].empty for df in [d["attack"]]])
+    hd_season = pd.concat([df[df["Type"]=="Heroes"] for d in per_war.values() if not d["defense"].empty for df in [d["defense"]]])
+    ta_season = pd.concat([df[df["Type"]=="Titans"] for d in per_war.values() if not d["attack"].empty for df in [d["attack"]]])
+    td_season = pd.concat([df[df["Type"]=="Titans"] for d in per_war.values() if not d["defense"].empty for df in [d["defense"]]])
 
-    if not args.no_save_season:
-        save_season(season)
-        print(f"Season saved to: {SEASON_FILE}")
+    ha_season = ha_season.groupby("Player", as_index=False)["Points"].sum().sort_values("Points", ascending=False)
+    hd_season = hd_season.groupby("Player", as_index=False)["Points"].sum().sort_values("Points", ascending=False)
+    ta_season = ta_season.groupby("Player", as_index=False)["Points"].sum().sort_values("Points", ascending=False)
+    td_season = td_season.groupby("Player", as_index=False)["Points"].sum().sort_values("Points", ascending=False)
 
-    # Costruzione ranking per Excel (invariato rispetto a prima)
-    heroes_attack, heroes_defense, titans_attack, titans_defense = [], [], [], []
-    for date, data in per_war.items():
-        a, d = data["attack"], data["defense"]
-        if not a.empty:
-            ha = a[a["Type"]=="Heroes"].groupby("Attacker")["Points"].sum().reset_index().sort_values("Points", ascending=False)
-            ta = a[a["Type"]=="Titans"].groupby("Attacker")["Points"].sum().reset_index().sort_values("Points", ascending=False)
-            ha["WarDate"], ta["WarDate"] = date, date
-            heroes_attack.append(ha); titans_attack.append(ta)
-        if not d.empty:
-            hd = d[d["Type"]=="Heroes"]["Defender"].value_counts().reset_index().rename(columns={"index":"Defender","Defender":"Count"})
-            td = d[d["Type"]=="Titans"]["Defender"].value_counts().reset_index().rename(columns={"index":"Defender","Defender":"Count"})
-            hd["WarDate"], td["WarDate"] = date, date
-            heroes_defense.append(hd); titans_defense.append(td)
-
-    heroes_attack_df = pd.concat(heroes_attack, ignore_index=True) if heroes_attack else pd.DataFrame(columns=["Attacker","Points","WarDate"])
-    heroes_defense_df = pd.concat(heroes_defense, ignore_index=True) if heroes_defense else pd.DataFrame(columns=["Defender","Count","WarDate"])
-    titans_attack_df = pd.concat(titans_attack, ignore_index=True) if titans_attack else pd.DataFrame(columns=["Attacker","Points","WarDate"])
-    titans_defense_df = pd.concat(titans_defense, ignore_index=True) if titans_defense else pd.DataFrame(columns=["Defender","Count","WarDate"])
-
-    ha_season = pd.DataFrame(sorted(season.get("heroes_attack",{}).items(), key=lambda x:-x[1]), columns=["Attacker","Points"])
-    ta_season = pd.DataFrame(sorted(season.get("titans_attack",{}).items(), key=lambda x:-x[1]), columns=["Attacker","Points"])
-    hd_season = pd.DataFrame(sorted(season.get("heroes_defense",{}).items(), key=lambda x:-x[1]), columns=["Defender","Count"])
-    td_season = pd.DataFrame(sorted(season.get("titans_defense",{}).items(), key=lambda x:-x[1]), columns=["Defender","Count"])
-
-    out_heroes = Path("heroes.xlsx")
-    out_titans = Path("titans.xlsx")
-    with pd.ExcelWriter(out_heroes, engine="openpyxl") as writer:
-        heroes_attack_df.to_excel(writer, sheet_name="Attack_Per_War", index=False)
-        heroes_defense_df.to_excel(writer, sheet_name="Defense_Per_War", index=False)
-        ha_season.to_excel(writer, sheet_name="Season_Attack", index=False)
-        hd_season.to_excel(writer, sheet_name="Season_Defense", index=False)
-    with pd.ExcelWriter(out_titans, engine="openpyxl") as writer:
-        titans_attack_df.to_excel(writer, sheet_name="Attack_Per_War", index=False)
-        titans_defense_df.to_excel(writer, sheet_name="Defense_Per_War", index=False)
-        ta_season.to_excel(writer, sheet_name="Season_Attack", index=False)
-        td_season.to_excel(writer, sheet_name="Season_Defense", index=False)
+    guild_scores = pd.DataFrame(
+        [(date, data.get("guild_score", None)) for date, data in per_war.items()],
+        columns=["WarDate", "GuildScore"]
+    )
 
     out_compact = Path("season_summary_all.xlsx")
     with pd.ExcelWriter(out_compact, engine="openpyxl") as writer:
@@ -288,22 +184,11 @@ def main(argv):
         hd_season.to_excel(writer, sheet_name="Heroes_Defense_Season", index=False)
         ta_season.to_excel(writer, sheet_name="Titans_Attack_Season", index=False)
         td_season.to_excel(writer, sheet_name="Titans_Defense_Season", index=False)
-        guild_scores = pd.DataFrame(
-            [(date, data.get("guild_score", None)) for date, data in per_war.items()],
-            columns=["WarDate", "GuildScore"]
-        )
         guild_scores.to_excel(writer, sheet_name="Guild_Scores", index=False)
 
     print(f"Saved: {out_compact.name}")
 
-    print("\n=== Season Top (Heroes Attack) ===")
-    print(ha_season.head(10).to_string(index=False))
-    print("\n=== Season Top (Titans Attack) ===")
-    print(ta_season.head(10).to_string(index=False))
-    print("\n=== Season Top (Heroes Defense) ===")
-    print(hd_season.head(10).to_string(index=False))
-    print("\n=== Season Top (Titans Defense) ===")
-    print(td_season.head(10).to_string(index=False))
+    export_html(ha_season, hd_season, ta_season, td_season, guild_scores)
 
     return 0
 
